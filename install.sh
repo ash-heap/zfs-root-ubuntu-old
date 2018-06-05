@@ -47,7 +47,7 @@ function exit_with_changes {
 
 
 function list_drives() {
-    lsblk --noheadings --output NAME | grep -v 'loop' | grep -P '^[\w\d]*'
+    lsblk --noheadings --output NAME | grep -v 'loop' | grep -P '^[\w\d]*$'
 }
 
 
@@ -118,7 +118,7 @@ function make_root_pool {
             --yesno "$msg" 12 70;
         then
             prepare_drive "${root_drives[0]}"
-            cmd zpool create -o ashift=12 \
+            cmd zpool create -f -o ashift=12 \
               -O atime=off -O canmount=off -O compression=lz4 \
               -O normalization=formD -O xattr=sa -O mountpoint=/ -R /mnt \
               "$RPOOL" "${root_drives[0]}-part1"
@@ -142,7 +142,7 @@ function make_root_pool {
                 prepare_drive "$drive"
                 partitions+=("$drive""-part1")
             done
-            cmd zpool create -o ashift=12 \
+            cmd zpool create -f -o ashift=12 \
               -O atime=off -O canmount=off -O compression=lz4 \
               -O normalization=formD -O xattr=sa -O mountpoint=/ -R /mnt \
               "$RPOOL" mirror "${partitions[@]}"
@@ -392,10 +392,10 @@ function configure_system() {
 # fi
 
 function main() {
-    # set_root_pool
-    # make_root_pool
-    # make_filesystems
-    configure_system
+    set_root_pool
+    make_root_pool
+    make_filesystems
+    # configure_system
     # echo "hello"
 }
 
