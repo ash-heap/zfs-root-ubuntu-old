@@ -17,6 +17,8 @@ DEBUG=1
 
 BACKTITLE="Installing Ubuntu 18.04 on ZFS root pool..."
 
+RPOOL="rpool"
+
 
 
 # drives=($(ls /dev/sd* | grep '/dev/sd\w$' | awk '!/^ / && NF {print $1; print $1}'))
@@ -27,11 +29,19 @@ BACKTITLE="Installing Ubuntu 18.04 on ZFS root pool..."
 #
 
 
-function exit_no_changes {
+function exit_without_changes {
     dialog \
         --title "Installation Canceled" \
         --backtitle "$BACKTITLE"  \
         --msgbox "No changes made to disk." 6 40
+    exit 0;
+}
+
+function exit_with_changes {
+    dialog \
+        --title "Installation Canceled" \
+        --backtitle "$BACKTITLE"  \
+        --msgbox "Disk is in an unknown state." 6 40
     exit 0;
 }
 
@@ -79,7 +89,7 @@ function create_root_pool {
         $((8+${#root_drives[@]})) 90 ${#root_drives[@]} "${drives[@]}" 2>"$RESULTS"
     EXIT=$?
     if [ "$EXIT" -ne 0 ]; then
-        exit_no_changes
+        exit_without_changes
     fi
     mapfile -t root_drives < "$RESULTS"
     if [ "${#root_drives[@]}" -eq 0 ]; then
@@ -94,7 +104,7 @@ function create_root_pool {
             create_root_pool
             return 0
         else
-            exit_no_changes
+            exit_without_changes
         fi
     elif [ "${#root_drives[@]}" -eq 1 ]; then
         msg="All data will be lost on drive:\\n\\n"
@@ -113,7 +123,7 @@ function create_root_pool {
               -O normalization=formD -O xattr=sa -O mountpoint=/ -R /mnt \
               "$RPOOL" "${root_drives[0]}-part1"
         else
-            exit_no_changes
+            exit_without_changes
         fi
     else
         msg="All data will be lost on drives:\\n\\n"
@@ -137,13 +147,12 @@ function create_root_pool {
               -O normalization=formD -O xattr=sa -O mountpoint=/ -R /mnt \
               "$RPOOL" mirror "${partitions[@]}"
         else
-            exit_no_changes
+            exit_without_changes
         fi
     fi
 }
 
 
-RPOOL="rpool"
 
 
 
@@ -157,7 +166,7 @@ function set_root_pool() {
         --inputbox "$msg" 11 70 "$RPOOL" 2>"$RESULTS"
     EXIT=$?
     if [ "$EXIT" -ne 0 ]; then
-        exit_no_changes
+        exit_without_changes
     fi
     RPOOL="$(<"$RESULTS")"
     echo "$RPOOL"
@@ -170,11 +179,12 @@ function set_root_pool() {
             --inputbox "$msg" 11 70 "$RPOOL" 2>"$RESULTS"
         EXIT=$?
         if [ "$EXIT" -ne 0 ]; then
-            exit_no_changes
+            exit_without_changes
         fi
         RPOOL=$(<"$RESULTS")
     done
 }
+
 
 function prepare_drive() {
     cmd apt-add-repository universe
@@ -187,13 +197,94 @@ function prepare_drive() {
 }
 
 
+function make_filesystems() {
+
+    msg="Select which directories you want separate ZFS filesystems for."
+    dialog \
+        --title "Optional Filesystems" \
+        --backtitle "$BACKTITLE" \
+        --separate-output \
+        --checklist "$msg" \
+        17 60 9 \
+        "local" "/usr/local" ON \
+        "opt" "/opt" ON \
+        "srv" "/var/srv" OFF \
+        "games" "/var/games" OFF \
+        "mongodb" "/var/lib/mongodb" OFF \
+        "mysql" "/var/lib/mysql" OFF \
+        "postgres" "/var/lib/postgres" OFF \
+        "nfs" "/var/lib/nfs" OFF \
+        "mail" "/var/mail" OFF \
+        2>"$RESULTS"
+    EXIT=$?
+    if [ "$EXIT" -ne 0 ]; then
+        exit_with_changes
+    fi
+    local options
+    mapfile -t options < "$RESULTS"
+
+    # / and root
+    cmd zfs create -o canmount=off -o mountpoint=none rpool/ROOT
+    cmd zfs create -o canmount=noauto -o mountpoint=/ rpool/ROOT/ubuntu
+    cmd zfs mount rpool/ROOT/ubuntu
+    cmd zfs create                 -o setuid=off                rpool/home
+    cmd zfs create -o mountpoint=/root                          rpool/home/root
+
+    # var
+    cmd zfs create -o canmount=off -o setuid=off  -o exec=off   rpool/var
+    cmd zfs create -o com.sun:auto-snapshot=false               rpool/var/cache
+    cmd zfs create -o acltype=posixacl -o xattr=sa              rpool/var/log
+    cmd zfs create                                              rpool/var/spool
+    cmd zfs create -o com.sun:auto-snapshot=false               rpool/var/tmp
+
+    # optional filesystems
+    for option in "${options[@]}"; do
+        case "$option" in
+            local)
+                cmd zfs create -o canmount=off -o rpool/usr
+                cmd zfs create rpool/usr/local
+                ;;
+            opt)
+                cmd zfs create rpool/opt
+                ;;
+            srv)
+                cmd zfs create -o setuid=off -o exec=off rpool/srv
+                ;;
+            games)
+                cmd zfs create -o exec=on rpool/games
+                ;;
+            mongodb)
+                cmd zfs create -o canmount=off rpool/var/lib
+                cmd zfs create rpool/var/lib/mongodb
+                ;;
+            mysql)
+                cmd zfs create -o canmount=off rpool/var/lib
+                cmd zfs create rpool/var/lib/mysql
+                ;;
+            postgres)
+                cmd zfs create -o canmount=off rpool/var/lib
+                cmd zfs create rpool/var/lib/postgres
+                ;;
+            nfs)
+                cmd zfs create -o canmount=off rpool/var/lib
+                cmd zfs create -o com.sun:auto-snapshot=false rpool/var/lib/nfs
+                ;;
+            mail)
+                cmd zfs create rpool/var/mail
+                ;;
+        esac
+    done
+}
+
+
 function cmd {
     # Log command.
     if [ "$DEBUG" -ne 0 ]; then
         echo "$@" >>zfs_root.log
     # Run command.
     else
-        $(echo "$@")
+        echo "$@" >>zfs_root.log
+        $(echo "$@") >>zfs_root.log 2>&1 
     fi
 }
 
@@ -208,8 +299,9 @@ function cmd {
 # fi
 
 function main() {
-    set_root_pool
-    create_root_pool
+    # set_root_pool
+    # create_root_pool
+    make_filesystems
 }
 
 main
