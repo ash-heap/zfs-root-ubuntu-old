@@ -47,7 +47,7 @@ function exit_with_changes {
 
 
 function list_drives() {
-    lsblk --noheadings --output NAME | grep -vP 'sd\w\d'
+    lsblk --noheadings --output NAME | grep -v 'loop' | grep -P '^[\w\d]*'
 }
 
 
@@ -55,12 +55,12 @@ function sdx_to_id() {
     find /dev/disk/by-id -name '*' \
         -exec echo -n {}" " \; -exec readlink -f {} \; | \
         awk -v sdx="$1" \
-        '($2 ~ sdx"$") && ($1 !~ "^/dev/disk/by-id/wwn"){print $1}'
+        '($2 ~ sdx"$") && ($1 !~ "wwn|eui"){print $1}'
     }
 
 
 function list_interfaces() {
-    ip link | awk -F: '$0 !~ "lo|vir|wl|^[^0-9]"{print $2}'
+    ip -o link show | awk -F': ' '$2 ~ "en"{print $2}'
 }
 
 
@@ -69,7 +69,7 @@ function drive_size() {
 }
 
 
-function create_root_pool {
+function make_root_pool {
     local drives=()
     for sdx in $(list_drives); do
         id=$(sdx_to_id "$sdx")
@@ -84,9 +84,9 @@ function create_root_pool {
         --title "Select Root Drives" \
         --backtitle "$BACKTITLE" \
         --ok-button "Format Drives" \
-         --notags --separate-output \
+        --notags --separate-output \
         --checklist "$msg" \
-        $((8+${#root_drives[@]})) 90 ${#root_drives[@]} "${drives[@]}" 2>"$RESULTS"
+        $((8+${#drives[@]})) 90 ${#drives[@]} "${drives[@]}" 2>"$RESULTS"
     EXIT=$?
     if [ "$EXIT" -ne 0 ]; then
         exit_without_changes
@@ -101,7 +101,7 @@ function create_root_pool {
             --yesno "$msg" 7 60
         EXIT=$?
         if [ "$EXIT" -eq 1 ]; then
-            create_root_pool
+            make_root_pool
             return 0
         else
             exit_without_changes
@@ -241,7 +241,7 @@ function make_filesystems() {
     for option in "${options[@]}"; do
         case "$option" in
             local)
-                cmd zfs create -o canmount=off -o rpool/usr
+                cmd zfs create -o canmount=off rpool/usr
                 cmd zfs create rpool/usr/local
                 ;;
             opt)
@@ -278,14 +278,107 @@ function make_filesystems() {
 
 
 function cmd {
-    # Log command.
-    if [ "$DEBUG" -ne 0 ]; then
-        echo "$@" >>zfs_root.log
-    # Run command.
-    else
-        echo "$@" >>zfs_root.log
+    echo "$@" >>zfs_root.log
+    if [ "$DEBUG" -eq 0 ]; then
         $(echo "$@") >>zfs_root.log 2>&1 
     fi
+}
+
+
+function append {
+    echo "echo -e \"$1\" > \"$2\"" >>zfs_root.log
+    if [ "$DEBUG" -eq 0 ]; then
+        echo -e "$1" >> "$2"
+    fi
+}
+
+
+function overwrite {
+    echo "echo -e \"$1\" > \"$2\"" >>zfs_root.log
+    if [ "$DEBUG" -eq 0 ]; then
+        echo -e "$1" > "$2"
+    fi
+}
+
+
+function install_system() {
+    chmod 1777 /mnt/var/tmp
+    debootstrap bionic /mnt
+    zfs set devices=off rpool
+}
+
+
+function set_hostname() {
+    msg="Specify the fully quialified domain name or host name of the "
+    msg+="system:\\n"
+    dialog \
+        --title "Hostname" \
+        --backtitle "$BACKTITLE"  \
+        --inputbox "$msg" 9 70 2>"$RESULTS"
+    EXIT=$?
+    if [ "$EXIT" -ne 0 ]; then
+        exit_with_changes
+    fi
+    FQDN="$(<"$RESULTS")"
+    while [[ ("$FQDN" == "") || ("$FQDN" =~ [^a-zA-Z0-9\.]) ]]; do
+        msg="Fully qualified domain names must consists of sections of "
+        msg+="alphanumeric strings seperated by dots.\\n\\n"
+        msg+="Specify the fully quialified domain name or host name of the "
+        msg+="system:\\n"
+        dialog \
+            --title "Hostname" \
+            --backtitle "$BACKTITLE"  \
+            --inputbox "$msg" 11 70 "$FQDN" 2>"$RESULTS"
+        EXIT=$?
+        if [ "$EXIT" -ne 0 ]; then
+            exit_with_changes
+        fi
+        FQDN=$(<"$RESULTS")
+    done
+    overwrite "$(echo "$FQDN" | grep -Po '^[\w\d]*')" \
+        "/mnt/etc/hostname"
+    append "127.0.1.1        $FQDN" "/mnt/etc/hosts"
+}
+
+
+function configure_system() {
+    # set_hostname
+
+
+
+    local interfaces=()
+    for eth in $(list_interfaces); do
+        interfaces+=("$eth")
+        interfaces+=("$eth")
+    done
+    
+    # for i in "${interfaces[@]}"; do
+    #     echo "$i"
+    # done
+
+    msg="Select ethernet device to use for remainer of installation.  "
+    msg+="Only single drive and mirrored configurations are supported at " \
+    msg+="this time.  ALL DATA on chosen drives will be LOST."
+    dialog \
+        --title "Select Ethernet Interface" \
+        --backtitle "$BACKTITLE" \
+        --notags \
+        --menu "$msg" 34 90 10 "${interfaces[@]}"
+        # 2>"$RESULTS"
+    EXIT=$?
+    echo $EXIT
+    # if [ "$EXIT" -ne 0 ]; then
+    #     exit_with_changes
+    # fi
+
+    ETHERNET=eth1
+    msg="# temporary \\n"
+    msg+="network:\\n"
+    msg+="  version: 2\\n"
+    msg+="  ethernets: 2\\n"
+    msg+="    $ETHERNET:\\n"
+    msg+="      dhcp4: true"
+    overwrite "$msg" /mnt/etc/apt/sources.list
 }
 
 # Verify root.
@@ -300,8 +393,10 @@ function cmd {
 
 function main() {
     # set_root_pool
-    # create_root_pool
-    make_filesystems
+    # make_root_pool
+    # make_filesystems
+    configure_system
+    # echo "hello"
 }
 
 main
